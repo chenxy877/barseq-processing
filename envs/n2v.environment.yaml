@@ -1,4 +1,4 @@
-name: n2v
+name: n2v_bsp
 channels:
   - conda-forge
   - bioconda

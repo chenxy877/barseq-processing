@@ -1,4 +1,4 @@
-name: bardensr
+name: bardensr_bsp
 channels:
   - conda-forge
   - defaults

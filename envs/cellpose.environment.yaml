@@ -1,4 +1,4 @@
-name: cellpose
+name: cellpose_bsp
 channels:
   - conda-forge
   - defaults
