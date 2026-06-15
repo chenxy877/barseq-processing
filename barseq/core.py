@@ -901,8 +901,8 @@ def make_command_list_single(file_map, stage, bse, indir, outdir, cp):
         cmd.append('--stage')
         cmd.append(f'{stage}')
 
-        if template_mode is not None:            
-            cmd.append( f'--template ')
+        if template_mode is not None:
+            cmd.append('--template')
             if template_source == 'input':
                 template_file = os.path.join(indir, template_stagedir, template_fileset_list[i][0])
             else:
@@ -948,11 +948,11 @@ def make_command_list_single(file_map, stage, bse, indir, outdir, cp):
         else:
             logging.warning(f'arity unclear. input_list len={len(input_list)} output_list len={len(output_list)}')                        
 
-        cmd.append( '--infiles ')
+        cmd.append('--infiles')
         for fpath in inlist:
             cmd.append(fpath)
 
-        cmd.append( '--outfiles ')    
+        cmd.append('--outfiles')
         for fpath in outlist:
             cmd.append(fpath)
 

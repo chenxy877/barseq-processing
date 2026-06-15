@@ -266,9 +266,9 @@ def run_command_shell(cmd):
     cmdstr = " ".join(cmd)
     logging.debug(f"running command: {cmdstr} ")
     start = dt.datetime.now()
-    cp = subprocess.run(" ".join(cmd), 
-                    shell=True, 
-                    stdout=subprocess.PIPE, 
+    cp = subprocess.run(cmd,
+                    shell=False,
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT)
 
     end = dt.datetime.now()
@@ -286,6 +286,8 @@ def run_command_shell(cmd):
         logging.debug(f'got rc={cp.returncode} command= {cmdstr}')
     else:
         logging.warning(f'got rc={cp.returncode} command= {cmdstr}')
+        if cp.stdout is not None:
+            logging.warning(f'subprocess output:\n{cp.stdout.decode(errors="replace") if isinstance(cp.stdout, bytes) else cp.stdout}')
         # raise NonZeroReturnException(f'For cmd {cmdstr}')
     return cp
 
