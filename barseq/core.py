@@ -760,8 +760,8 @@ def make_command_list(file_map, stage, bse, indir, outdir, cp):
             logging.debug(f'stage = {stage} file_index={j} n_input={len(input_list)} n_output={len(output_list)} num_cycles={num_cycles}')
             logging.debug(f'input = {input_list} output = {output_list}')
 
-            if template_mode is not None:            
-                cmd.append( f'--template ')
+            if template_mode is not None:
+                cmd.append('--template')
                 if template_source == 'input':
                     #template_file = os.path.join(indir, template_stagedir, template_fileset_list[i][0])
                     template_file = os.path.join(indir, template_stagedir, chunked_templates[i][j][0])
@@ -809,11 +809,11 @@ def make_command_list(file_map, stage, bse, indir, outdir, cp):
             else:
                 logging.warning(f'arity unclear. input_list len={len(input_list)} output_list len={len(output_list)}')                        
 
-            cmd.append( '--infiles ')
+            cmd.append('--infiles')
             for fpath in inlist:
                 cmd.append(fpath)
 
-            cmd.append( '--outfiles ')    
+            cmd.append('--outfiles')
             for fpath in outlist:
                 cmd.append(fpath)
 
