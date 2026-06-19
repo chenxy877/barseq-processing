@@ -690,6 +690,17 @@ def make_command_list(file_map, stage, bse, indir, outdir, cp):
     #
     n_chunks = cp.getint(stage, 'n_chunks', fallback=1)
 
+    # Control-FOV subset (calc-params): MATLAB bardensrbasecall.py calibrates the
+    # bardensr threshold on control FOVs (controlidx=range(25,35)) when there are
+    # >=36 FOVs, else all of them. Subsetting here also keeps the calc-params command
+    # line (one --infiles group per FOV x its cycles) under the Windows ~32KB limit on
+    # large datasets -- passing all 63 FOVs x 7 cycles overflowed it (WinError 206).
+    control_fovs = get_config_none(cp, stage, 'control_fovs')
+    if control_fovs is not None and len(file_map) >= 36:
+        lo, hi = [int(x) for x in str(control_fovs).split(':')]
+        file_map = file_map[lo:hi]
+        logging.info(f'{stage}: calibrating on control FOVs [{lo}:{hi}] ({len(file_map)} FOVs)')
+
     tool = cp.get( stage ,'tool')
     conda_env = cp.get( tool ,'conda_env')
     current_env = os.environ['CONDA_DEFAULT_ENV']
