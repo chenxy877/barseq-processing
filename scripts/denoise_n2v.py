@@ -90,7 +90,11 @@ def denoise_n2v( infiles, outfiles, stage=None, cp=None):
         for j, img in enumerate(imgarray):
             try:
                 logging.debug(f'{base}.{ext}[{i}] shape={img.shape} dtype={img.dtype}')
-                pimg = models[j].predict(img, axes='YX')   # float32 prediction
+                # n_tiles: split the 3200x3200 predict into 2x2 tiles so each n2v
+                # process peaks at ~4GB instead of ~15GB. Without this, 32 parallel
+                # full-image predicts OOM (32 x 15GB >> 256GB RAM). Tiling is
+                # artifact-free (PadAndCropResizer handles the seams).
+                pimg = models[j].predict(img, axes='YX', n_tiles=(2, 2))   # float32 prediction
                 logging.debug(f'got model output: {base}.{ext}[{j}] shape={pimg.shape} dtype={pimg.dtype}')
             except Exception:
                 logging.warning(f'ran out of models, appending channel [{j}] without prediction.')
