@@ -127,32 +127,60 @@ def basecall_hyb_ski( infiles, outfiles, stage=None, cp=None):
     joblib.dump(data_dict, outfile)
 
 
+# channel index -> gene index, from codebook_channels (1-based 1,2,4 -> 0-based 0,1,3).
+# In MATLAB this is codes(:,m)==n (codebook lookup); the all-genes/registration
+# channel (all_genes_ch) has no gene and is skipped.
+CH_TO_GENE = {0: 0, 1: 1, 3: 2}
+
+
 def basecall_hyb_ski_single(infile,
-                            outdir, 
+                            outdir,
                             num_c,
                             all_genes_ch,
                             hyb_2,
                             thresh,
-                            prominence                        
+                            prominence
                             ):
-    lroi_x=[]
-    lroi_y=[]
-    id_t=[]
-    sig_t=[]
+    '''
+    Port of MATLAB mmbasecallhyb_multi (single-cycle). Per gene channel n:
+      peaks = imregionalmax(imreconstruct(max(a-hybthresh,0), a))  ==  h_maxima(a, prominence[n])
+      take the BRIGHTEST pixel of each maximal region (MATLAB max(a(component)));
+      keep peaks with intensity > bgn (== thresh[n]);
+      assign the gene for channel n (codebook), NOT argmax over channels.
+    NOTE prominence[n] == MATLAB hybthresh (peak detection), thresh[n] == MATLAB
+    bgn (final intensity filter). h_maxima is applied to the FULL channel (not a
+    pre-masked image), matching MATLAB.
+    '''
+    lroi_x = []
+    lroi_y = []
+    id_t = []
+    sig_t = []
     mask = np.zeros_like(hyb_2)
     for n in range(num_c):
         if n == all_genes_ch:
-            mask[n,:,:]=0
             continue
-        else:
-            a = hyb_2[n,:,:].copy()
-            a_mask = a > thresh[n]
-            a_masked = a * a_mask
-            a_max = extrema.h_maxima(a_masked, prominence[n])
-            label_peaks = label(a_max)
-            m = regionprops(label_peaks, a_masked)
-            mask[n,:,:] = uint16m(binary_dilation(a_max))
-            [lroi_x, lroi_y, id_t, sig_t] = quantify_peaks(lroi_x, lroi_y, id_t, sig_t, m, hyb_2)
+        a = np.asarray(hyb_2[n, :, :], dtype=np.float64)
+        a_max = extrema.h_maxima(a, prominence[n])         # == imreconstruct + imregionalmax
+        label_peaks = label(a_max)
+        regions = regionprops(label_peaks, a)
+        mask[n, :, :] = uint16m(binary_dilation(a_max))
+
+        rx, ry, rid, rsig = [], [], [], []
+        for peak in regions:
+            coords = peak.coords                            # (row, col) pixels in maximal region
+            vals = a[coords[:, 0], coords[:, 1]]
+            bi = int(np.argmax(vals))                       # brightest pixel (MATLAB max(a(component)))
+            prow, pcol = int(coords[bi, 0]), int(coords[bi, 1])
+            sig = a[prow, pcol]
+            if sig > thresh[n]:                             # MATLAB: a(peak) > bgn(n)
+                ry.append(prow)                             # lroi_x = row, lroi_y = col
+                rx.append(pcol)                             # (matches geneseq merge + aggregate mask[row,col])
+                rid.append(CH_TO_GENE[n])
+                rsig.append(sig)
+        lroi_x.append(ry)
+        lroi_y.append(rx)
+        id_t.append(rid)
+        sig_t.append(rsig)
 
     (dirpath, base ) = os.path.split(infile)
     (base,ext) = os.path.splitext(base)
@@ -172,40 +200,6 @@ def basecall_hyb_ski_single(infile,
     logging.debug(f'Writing basecall map to {of}')
     write_image(of, gene_map)
     return(lroi_x, lroi_y, id_t, sig_t)
-
-
-def quantify_peaks(lroi_x, lroi_y, id_t, sig_t, m, hyb_2):
-    """
-    Basecalling function:
-    1. Based on the regionprops results per tile, this function creates hyb basecalling output and decodes the gene
-    2. Returns the basecall output to the calling function
-    """ 
-    sig1=[]
-    lroi1_x=[]
-    lroi1_y=[]
-    id1=[]
-    ch_to_gene={0:0, 1:1, 3:2}  # skip all_genes_ch=2
-    for i, peaks in enumerate(m):
-        lroi1_x.append(peaks.centroid[0])
-        lroi1_y.append(peaks.centroid[1])
-        sig1.append(peaks.intensity_max)
-        peaks_s = print_regionprop(peaks)
-        logging.debug(f'hyb_2 = {hyb_2}')
-        logging.debug(f'hyb_2.shape = {hyb_2.shape}')
-        logging.debug(f'\n [{i}] {peaks_s}')
-        id1.append( ch_to_gene[ np.argmax( hyb_2[:, peaks.coords[0][0], peaks.coords[0][1]]) ])
-    lroi_x.append(lroi1_x)
-    lroi_y.append(lroi1_y)
-    id_t.append(id1)
-    sig_t.append(sig1)
-    return(lroi_x, lroi_y, id_t, sig_t)
-
-def print_regionprop(prop):
-    s = ''
-    s += f'\n  coords[0][0] = {prop.coords[0][0]}'
-    s += f'\n  coords[0][1] = {prop.coords[0][1]}'
-    s += f'\n  orientation={prop.orientation}'
-    return s
 
 if __name__ == '__main__':
     FORMAT='%(asctime)s (UTC) [ %(levelname)s ] %(filename)s:%(lineno)d %(name)s.%(funcName)s(): %(message)s'

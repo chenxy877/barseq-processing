@@ -21,4 +21,15 @@ dependencies:
   - libgfortran
   - libgfortran5
   - natsort
+  - pip
+  # n2v/csbdeep are pip-only. n2v 0.3.1 downgrades keras to 2.3.1 (breaks
+  # tensorflow.keras), so re-pin tensorflow==2.10.0 in the SAME pip step to keep
+  # keras 2.10.0. (See n2v.softenv.txt.) On Windows, create with a SHORT pkgs
+  # cache to dodge the 260-char path limit on TensorFlow's MLIR headers, e.g.
+  #   CONDA_PKGS_DIRS=C:\cp  conda env create -f n2v.environment.yaml
+  - pip:
+    - n2v==0.3.1
+    - csbdeep==0.6.3
+    - h5py==3.12.1
+    - tensorflow==2.10.0
 

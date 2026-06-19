@@ -19,6 +19,13 @@ import logging
 import os
 import sys
 
+# Determinism: TensorFlow's oneDNN custom ops reorder float accumulation and make
+# n2v predictions non-reproducible run-to-run (e.g. hyb ch0 86.5 vs 97.1). Disabling
+# oneDNN makes the denoise deterministic AND bit-match the MATLAB n2v output exactly,
+# which removes the n2v-noise that was leaking into the bardensr threshold calibration
+# and the hyb basecalling. Must be set BEFORE tensorflow is imported (via n2v below).
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 import datetime as dt
 
 from configparser import ConfigParser
@@ -83,16 +90,21 @@ def denoise_n2v( infiles, outfiles, stage=None, cp=None):
         for j, img in enumerate(imgarray):
             try:
                 logging.debug(f'{base}.{ext}[{i}] shape={img.shape} dtype={img.dtype}')
-                pimg = models[j].predict(img, axes='YX')
+                pimg = models[j].predict(img, axes='YX')   # float32 prediction
                 logging.debug(f'got model output: {base}.{ext}[{j}] shape={pimg.shape} dtype={pimg.dtype}')
-                pimg = pimg.astype(output_dtype)
-                if do_min_subtraction:
-                    pimg = pimg - pimg.min()  
-                logging.debug(f'new dtype={pimg.dtype}')
-                pred_image.append(pimg)
-            except:
-                logging.warning(f'ran out of models, appending channel [{j}] unchanged.')
-                pred_image.append(img)
+            except Exception:
+                logging.warning(f'ran out of models, appending channel [{j}] without prediction.')
+                pimg = img
+            # Match MATLAB n2vprocessing.py: (pred - pred.min()).astype(uint16) -- min-subtract on
+            # the FLOAT prediction BEFORE the uint16 cast, for EVERY channel including appended
+            # non-seq channels (DAPI/DIC). The previous order (cast to uint16 first, and no
+            # min-subtraction on appended channels) left a +110 imaging / +72 DAPI brightness offset
+            # vs MATLAB that propagated into hyb basecalling and the bardensr threshold calibration.
+            if do_min_subtraction:
+                pimg = pimg - pimg.min()
+            pimg = pimg.astype(output_dtype)
+            logging.debug(f'final dtype={pimg.dtype}')
+            pred_image.append(pimg)
                
         logging.debug(f'done predicting {base}.{ext} {len(pred_image)} channels. ')
         newimage = np.dstack(pred_image)

@@ -112,7 +112,12 @@ def calc_params_bardensr( infiles, outfiles, stage=None, cp=None):
         trimmed = bd_read_image_set(tileset, R, C, trim=trim)
         img_norm = trimmed / median_max[:, None, None, None]
         et = bardensr.spot_calling.estimate_density_singleshot( img_norm , codeflat, noisefloor_ini )
-        err_max.append( et[ :, :, :, pos_unused_codes].max(axis=(0,1,2)))
+        # BUG FIX: pos_unused_codes is a 2-tuple (row_idx, col_idx) from np.where on the
+        # 2-D genes array, with col_idx all 0. Indexing the code axis with the full tuple
+        # selected the 5 unused codes PLUS gene index 0 (Calb1) five times, inflating the
+        # base threshold (-> 0.796 vs MATLAB 0.676). Use only the row indices (the 5 unused
+        # codes), matching MATLAB ercc_codes. Same convention as the FDR loop below.
+        err_max.append( et[ :, :, :, pos_unused_codes[0]].max(axis=(0,1,2)))
     err_max = np.array( err_max )
     thresh = np.median( np.median( err_max, axis=1))
     logging.info(f'intensity_thresh_ini={thresh}')
@@ -127,7 +132,12 @@ def calc_params_bardensr( infiles, outfiles, stage=None, cp=None):
         cropped = bd_read_image_set(tileset, R, C, cropf=cropf)
         img_norm = cropped / median_max[:, None, None, None]
         et=bardensr.spot_calling.estimate_density_singleshot( img_norm , codeflat, noisefloor_final)
-        for thresh1 in np.linspace( thresh-0.1, thresh+0.1, 10):
+        # MATLAB bardensrbasecall.py evaluates FDR over linspace(thresh-0.1, thresh+0.5, 10)
+        # but selects thresh_refined from linspace(thresh-0.1, thresh+0.1, 10) at the crossing
+        # index. The wider FDR search makes the crossing index smaller -> a lower selected
+        # threshold. Python previously used thresh+0.1 for the search too, yielding a higher
+        # threshold (0.796 vs MATLAB 0.676). Match MATLAB's search range here.
+        for thresh1 in np.linspace( thresh-0.1, thresh+0.5, 10):
             spots = bardensr.spot_calling.find_peaks(et, thresh1, use_tqdm_notebook=False)
             logging.info(f'For base={base} found {len(spots)} spots.')          
             err_c=0
@@ -153,6 +163,21 @@ def calc_params_bardensr( infiles, outfiles, stage=None, cp=None):
     param_outputs['intensity_thresh_refined'] = thresh_refined
     param_outputs['noisefloor_ini'] = noisefloor_ini
     param_outputs['noisefloor_final'] = noisefloor_final
+    # DIAGNOSTIC dump (threshold-calibration investigation): base thresh, FDR curve, search grid.
+    _thr = float(np.asarray(thresh).ravel()[0])
+    _em = np.asarray(err_max, dtype=float)          # (nFOV, nUnused)
+    param_outputs['_diag_intensity_thresh_ini'] = _thr
+    param_outputs['_diag_fdrmean'] = np.asarray(fdrmean, dtype=float).ravel().tolist()
+    param_outputs['_diag_thresh_search'] = np.linspace(_thr-0.1, _thr+0.5, 10).tolist()
+    param_outputs['_diag_thresh_select'] = np.linspace(_thr-0.1, _thr+0.1, 10).tolist()
+    param_outputs['_diag_selected_index'] = int(np.asarray(np.asarray(fdrmean).ravel() < fdrthresh).nonzero()[0][0])
+    param_outputs['_diag_errmax_fov_median'] = np.median(_em.reshape(_em.shape[0], -1), axis=1).tolist()
+    param_outputs['_diag_n_unused'] = int(_em.reshape(_em.shape[0], -1).shape[1])
+    # Persist the GLOBAL per-frame (cycle,channel) normalizer computed across control
+    # FOVs. MATLAB bardensrbasecall.py uses this same `maxmax` for BOTH threshold
+    # calibration and the final per-FOV basecalling; basecall-geneseq must reuse it so
+    # the calibrated threshold corresponds to the same density scale at basecall time.
+    param_outputs['median_max'] = [float(x) for x in np.asarray(median_max).ravel()]
     logging.info(f"threshold {thresh_refined} with noise floor {noisefloor_final}")
     logging.info(f"param_outputs= {param_outputs} {len(infiles)} input tilesets. ")
     

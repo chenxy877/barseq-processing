@@ -58,8 +58,15 @@ def regcycle_hyb_ski(infiles, outfiles, template=None, stage=None, cp=None ):
     logging.debug(f'select_channels={select_channels} select_indexes={select_indexes}') 
     logging.debug(f'template_select_channels={template_select_channels} template_select_indexes={template_select_indexes}')
 
-    upsample_factor=cp.getint(stage, 'upsample_factor')
-    logging.debug(f'upsample_factor={upsample_factor}')
+    # MATLAB mmalignhybtoseq_local: extra ball-chradius top-hat on the reg channel.
+    reg_channel_radius = cp.getint(stage, 'reg_channel_radius', fallback=30)
+    # Block cross-correlation params (shared with geneseq alignseq_maxthresh).
+    block_size = cp.getint(stage, 'block_size', fallback=256)
+    resize_factor = cp.getint(stage, 'resize_factor', fallback=5)
+    subsample_rate = cp.getint(stage, 'subsample_rate', fallback=4)
+    intensity_max_thresh = cp.getint(stage, 'intensity_max_thresh', fallback=0)
+    reg_disk_radius = cp.getint(stage, 'reg_disk_radius', fallback=10)
+    logging.debug(f'reg_channel_radius={reg_channel_radius} block_size={block_size} resize_factor={resize_factor}')
 
     # We know output is singleton
     outfile = outfiles[0]
@@ -84,36 +91,42 @@ def regcycle_hyb_ski(infiles, outfiles, template=None, stage=None, cp=None ):
     # Make template_sum_norm of template (fixed) file. i.e. geneseq01
     logging.debug(f'Reading template file: {template_file} all channels. ')
     template_image = read_image( template_file, template_select_indexes)
-
-    template_sum=np.double(np.sum( template_image, axis=0))
-    template_sum_norm=np.divide(template_sum, np.max(template_sum, axis=None))
-    fixed=template_sum_norm.copy()
-    logging.debug(f'fixed (template) file shape={fixed.shape}')
+    template_sum = np.double(np.sum( template_image, axis=0))
+    logging.debug(f'fixed (template) sum shape={template_sum.shape}')
 
     logging.debug(f'Reading moving file: {infile} ')
-    hyb_orig = read_image( infile , select_indexes )  
-    
-    moving_hyb=hyb_orig[reg_indexes,:,:]
-    moving_input = moving_hyb.copy()
-    moving=np.squeeze(moving_input,axis=0)
-    moving_norm=np.divide(moving,np.max(moving,axis=None))
-    moving=moving_norm
+    hyb_orig = read_image( infile , select_indexes )
 
-    moving=np.uint8(np.clip(moving*255,0,255))
-    fixed=np.uint8(np.clip(fixed*255,0,255))
+    # Registration channel (e.g. TxRed, the all-genes hyb channel). The hyb is
+    # already shift+ball-100 background+bleedthrough corrected by preprocess-hyb;
+    # MATLAB applies an EXTRA ball-chradius top-hat on the reg channel here.
+    reg = np.double(hyb_orig[reg_indexes[0], :, :])
+    reg_cond = ball_tophat(reg, reg_channel_radius)
 
-    hmatched_moving = match_histograms(moving, fixed)
-    shift_values,_,_ = pcc(fixed, hmatched_moving, upsample_factor=upsample_factor)
-    tform_hyb=skimage.transform.SimilarityTransform( translation=(-shift_values[1], -shift_values[0]))
+    # Register the hyb reg channel to the geneseq-sum template with the SAME block
+    # cross-correlation used for geneseq cycles (it correlates the shared rolony
+    # pattern). This is a deterministic, robust imregtform-EQUIVALENT: validated
+    # to recover the true shift on D077 where MATLAB imregtform (Mattes MI) drifts
+    # ~6px on already-aligned multimodal images, and where phase_cross_correlation
+    # fails on the hyb/geneseq modality difference (see scratch/exp_hybreg.*).
+    xoff, yoff = block_xcorr_translation(template_sum, reg_cond,
+                                         block_size=block_size, resize_factor=resize_factor,
+                                         subsample_rate=subsample_rate,
+                                         intensity_max_thresh=intensity_max_thresh,
+                                         disk_radius=reg_disk_radius)
+    logging.debug(f'hyb->geneseq offset xoff={xoff:.3f} yoff={yoff:.3f}')
+    tform_hyb = skimage.transform.SimilarityTransform( translation=(-xoff, -yoff))
 
-    Ih_aligned=np.zeros_like(hyb_orig)
+    template_sum_norm = template_sum   # name kept for the warp output_shape below
+    Ih_aligned = np.zeros_like(hyb_orig)
     for i in range(hyb_orig.shape[0]):
-        Ih_aligned[i,:,:] = skimage.transform.warp( np.squeeze(hyb_orig[i,:,:]), 
-                                                    tform_hyb, 
-                                                    preserve_range=True, 
-                                                    output_shape=(  template_sum_norm.shape[0], 
-                                                                    template_sum_norm.shape[1])
+        Ih_aligned[i,:,:] = skimage.transform.warp( np.squeeze(hyb_orig[i,:,:]),
+                                                    tform_hyb,
+                                                    preserve_range=True,
+                                                    output_shape=( template_sum_norm.shape[0],
+                                                                   template_sum_norm.shape[1])
                                                   )
+    Ih_aligned = uint16m(Ih_aligned)
     logging.debug(f'done processing {base}.{ext} ')
     logging.info(f'writing to {outfile}')
     write_image(outfile, Ih_aligned)

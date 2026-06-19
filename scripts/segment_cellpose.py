@@ -80,7 +80,12 @@ def segment_cellpose( infiles, outfiles, stage=None, cp=None):
 
     model = models.Cellpose( model_type = model_name,
                              gpu = use_gpu)
-    channels = [[0,1]]
+    # MATLAB Cellsegmentation-v065 uses channels=[1,2] (cytoplasm=1st channel,
+    # nucleus=2nd channel) on an (H,W,2) array. cp_input_image here is (2,H,W)
+    # with cyto at index 0, nucleus at index 1. channels=[1,2] = [cyto=1st,
+    # nucleus=2nd]; the previous [[0,1]] meant cyto=grayscale which is wrong.
+    # FLAG: verify channel_axis/order interaction with cellpose in the live test.
+    channels = [1, 2]
     logging.info('running cellpose...')
     masks, flows, styles, diams = model.eval( cellpose_input_stack, 
                                               diameter=cell_diameter, 
@@ -118,11 +123,14 @@ def prepare_cellpose_input(infiles, outfiles):
     hyb_image = read_image(infiles[0])
     cp_input_image = np.zeros( [2, hyb_image.shape[1], hyb_image.shape[2]] )
     gene_composite = np.zeros( [ hyb_image.shape[1],hyb_image.shape[2] ] )
-    for infile in infiles[1:]:
-        gene_image = read_image(infile, channels=[0, 1, 2, 3] )
-        gene_composite = gene_composite + np.sum( gene_image, axis=0 )
+    # MATLAB Cellsegmentation-v065: cytoplasm = hyb[0:3] + geneseq01[0:3], i.e.
+    # the first 3 channels of ONLY the first geneseq cycle (not all 4 channels,
+    # not all cycles); nuclear = hyb[4] (DAPI).
+    if len(infiles) > 1:
+        gene_image = read_image(infiles[1], channels=[0, 1, 2] )
+        gene_composite = np.sum( gene_image, axis=0 )
     nuclear_image = hyb_image[4]
-    cyto_image = np.sum( hyb_image[0:3], axis=0 ) + gene_composite 
+    cyto_image = np.sum( hyb_image[0:3], axis=0 ) + gene_composite
     cp_input_image[0,:,:]=uint16m(cyto_image)
     cp_input_image[1,:,:]=uint16m(nuclear_image)
     logging.debug(f'made cellpose input image. shape={cp_input_image.shape}')

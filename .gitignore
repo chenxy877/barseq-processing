@@ -129,3 +129,6 @@ dmypy.json
 .pyre/
 /.project
 /.pydevproject
+
+# Local scratch / validation experiments (algorithm-alignment work)
+scratch/

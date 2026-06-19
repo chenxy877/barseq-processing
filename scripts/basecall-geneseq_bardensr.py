@@ -63,6 +63,7 @@ def basecall_bardensr( infiles, outfiles, stage=None, cp=None):
     logging.debug(f'dirpath={dirpath} base={base} ext={ext} prefix={prefix} subdir={subdir}')
     
     intensity_thresh = None
+    median_max = None
     (subdir, base, current_label, current_ext) = parse_rpath(outfile)
     param_file = os.path.join(subdir, f'bardensrparams.json')
     if os.path.exists(param_file):
@@ -70,6 +71,9 @@ def basecall_bardensr( infiles, outfiles, stage=None, cp=None):
             data = json.load(f)
             intensity_thresh = float( data['intensity_thresh_refined'] )
             logging.info(f'Successfully loaded intensity_thresh = {intensity_thresh}')
+            if 'median_max' in data:
+                median_max = np.asarray(data['median_max'], dtype=float)
+                logging.info(f'Loaded global median_max (len={len(median_max)}) from params')
     else:
         logging.warning(f'param_file={param_file} does not exist. Exitting.')
         sys.exit(1)
@@ -97,20 +101,19 @@ def basecall_bardensr( infiles, outfiles, stage=None, cp=None):
     logging.debug(f'codeflat.shape = {codeflat.shape}')
     logging.debug(f'pos_unused_codes = {pos_unused_codes}')
 
-    # CALCULATING MAX OF EACH CYCLE AND EACH CHANNEL ACROSS ALL CONTROL FOVS
-    logging.debug(f'calculating max_per_RC...')
-    max_per_RC=[ bd_read_image_single(infile, R, C, cropf=cropf).max(axis=(1,2,3)) for infile in infiles ]
-    #max_per_RC=bd_read_images(infiles, R, C, cropf=cropf).max(axis=(1,2,3)) 
-    #logging.debug(f'max_per_RC len={len(max_per_RC)} item len={len(max_per_RC[0])}')
-
-    # Expected to be 28 values. channels * cycles. 
-    # first max(), then median of those max() per cycle. 
-    s = pprint.pformat(max_per_RC, indent=4)
-    logging.debug(f'max per RC = {s}')
-    median_max=np.median(max_per_RC, axis=0)
+    # NORMALIZATION: use the GLOBAL per-frame (cycle,channel) normalizer computed by
+    # calc-params across the control FOVs (== MATLAB bardensrbasecall.py `maxmax`). This
+    # is the same constant used to calibrate intensity_thresh, so the threshold maps to
+    # the same density scale here. (Previously this stage recomputed median_max per-tile
+    # via bd_read_image_single -- which ignores its loop index and re-reads one file --
+    # giving a per-channel, per-tile normalizer inconsistent with the calibrated threshold
+    # and inflating/distorting the spot calls. See calc-params_bardensr.py.)
+    if median_max is None:
+        logging.warning('median_max not found in params; falling back to per-tile estimate '
+                        '(threshold may be miscalibrated). Re-run calc-params to fix.')
+        max_per_RC=[ bd_read_image_single(infile, R, C, cropf=cropf).max(axis=(1,2,3)) for infile in infiles ]
+        median_max=np.median(max_per_RC, axis=0)
     logging.debug(f'median_max=\n{median_max}')
-    #s = pprint.pformat(median_max, indent=4)
-    #logging.debug(f'median_max = {s}')
 
     img_norm = bd_read_images(infiles, R, C, trim=trim ) / median_max[ :, None, None, None]
     logging.debug(f'img_norm shape={img_norm.shape}\ncodeflat={codeflat}\nnoisefloor_final={noisefloor_final}')

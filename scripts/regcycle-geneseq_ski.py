@@ -39,12 +39,16 @@ def regcycle_ski(infiles, outfiles, template=None, stage=None, cp=None ):
     
     subsample_rate = int(cp.get(stage,'subsample_rate'))
     resize_factor = int(cp.get(stage,'resize_factor'))
-    block_size = int(cp.get(stage,'block_size')) 
-    do_coarse = get_boolean( cp.get(stage, 'do_coarse') )
+    block_size = int(cp.get(stage,'block_size'))
     num_channels = int(cp.get(stage,'num_channels'))
+    # MATLAB alignseq_maxthresh: geneseq uses intensity_max_thresh=0 (pure
+    # top-hat + xcorr, no soma masking); disk top-hat radius is 10 (resized px).
+    intensity_max_thresh = int(cp.get(stage, 'intensity_max_thresh', fallback='0'))
+    disk_radius = int(cp.get(stage, 'reg_disk_radius', fallback='10'))
     logging.info(f' stage={stage} template={template}')
-    logging.debug(f'num_channels={num_channels} do_coarse={do_coarse} block_size={block_size}')
-    logging.debug(f'resize_factor={resize_factor} subsample_rate={subsample_rate}')
+    logging.debug(f'num_channels={num_channels} block_size={block_size} '
+                  f'resize_factor={resize_factor} subsample_rate={subsample_rate} '
+                  f'intensity_max_thresh={intensity_max_thresh}')
 
     if template is None:
         fixed_file = infiles[0]
@@ -53,11 +57,9 @@ def regcycle_ski(infiles, outfiles, template=None, stage=None, cp=None ):
     logging.debug(f'fixed_file = {fixed_file}')
 
     fixed = read_image( fixed_file )
-    fixed_sum = np.double(np.sum(fixed,axis=0))
-    fixed_sum = np.divide(fixed_sum,np.max(fixed_sum, axis=None))
-    sz=fixed_sum.shape
-    b_x=np.floor(sz[0]/block_size)
-    b_y=np.floor(sz[1]/block_size)
+    # MATLAB sums the first num_channels (seq) channels on the ORIGINAL double
+    # scale (no [0,1] normalization, no uint8 quantization).
+    fixed_sum = np.sum(np.asarray(fixed[:num_channels], dtype=np.float64), axis=0)
 
     for i, infile in enumerate( infiles ):
         outfile = outfiles[i]
@@ -67,64 +69,32 @@ def regcycle_ski(infiles, outfiles, template=None, stage=None, cp=None ):
             logging.debug(f'made outdir={outdir}')
         logging.info(f'Handling {infile} -> {outfile}')
         (dirpath, base, label, ext) = split_path(os.path.abspath(infile))
-        
 
         moving = read_image( infile )
-        total_channels = len(moving )
-        logging.debug(f'loaded image w/ {total_channels} channels. processing {num_channels} channels.')
-        
-        moving_sum=np.double(np.sum(moving, axis=0))
-        moving_sum=np.divide(moving_sum, np.max(moving_sum, axis=None))
+        moving_sum = np.sum(np.asarray(moving[:num_channels], dtype=np.float64), axis=0)
 
-        if b_x*block_size!=sz[0]:
-            fixed_sum=fixed_sum[0:b_x*block_size-1,:]
-            moving_sum=moving_sum[0:b_x*block_size-1,:]
-    
-        if b_y*block_size!=sz[1]:
-            fixed_sum=fixed_sum[:,0:b_y*block_size-1]
-            moving_sum=moving_sum[:,0:b_y*block_size-1]
-            
-        moving_rescaled=np.uint8(ski.transform.rescale(moving_sum, resize_factor)*255) 
-        
-        # check if this uint8 needs to be changed as per matlab standard-ng
-        fixed_rescaled=np.uint8(ski.transform.rescale(fixed_sum, resize_factor)*255)
-        moving_split=view_as_blocks(moving_rescaled, block_shape=( block_size*resize_factor, 
-                                                                   block_size*resize_factor))
-        fixed_split=view_as_blocks(fixed_rescaled, block_shape=( block_size*resize_factor, 
-                                                                 block_size*resize_factor))
-        fixed_split_lin=np.reshape(fixed_split,(-1, fixed_split.shape[2], fixed_split.shape[3]))       
-        fixed_split_sum=[np.sum(j,axis=None) for i,j in enumerate(fixed_split_lin)]
-        idx=np.argsort(fixed_split_sum)[::-1]
-        fixed_split_sum=np.reshape(fixed_split_sum,(fixed_split.shape[0],fixed_split.shape[1]))
-        moving_split_lin=np.reshape(moving_split,(-1,moving_split.shape[2],moving_split.shape[3]))
-        xcorr2=lambda a,b: fftconvolve(a, np.rot90(b,k=2))
-        c = np.zeros( (fixed_split_lin.shape[1]*2-1, fixed_split_lin.shape[2]*2-1) )
-        
-        for i in range( np.int32(np.round(fixed_split_lin.shape[0]/subsample_rate))): # check for int32-ng
-            if np.max( fixed_split_lin[idx[i]], axis=None)>0:
-                c=c+xcorr2( np.double(fixed_split_lin[idx[i]]), np.double(moving_split_lin[idx[i]]))
-                
-        shift_yx = np.unravel_index(np.argmax(c), c.shape)
-        yoffset = -np.array([(shift_yx[0]+1-fixed_split_lin.shape[1])/resize_factor])
-        xoffset = -np.array([(shift_yx[1]+1-fixed_split_lin.shape[2])/resize_factor])
-        idx_minxy = np.argmin(np.abs(xoffset) + np.abs(yoffset))
-        tform = ski.transform.SimilarityTransform( translation=[xoffset[idx_minxy], yoffset[idx_minxy]])
-    
-        logging.debug(f'transform calculated for {infile} to {fixed_file} Applying...')
-        moving_aligned=np.zeros_like(moving)
-        
-        for i in range(moving.shape[0]):
-            moving_aligned[i,:,:] = np.expand_dims( ski.transform.warp((np.squeeze(moving[i,:,:])),
-                                                   tform,
-                                                   preserve_range=True),
-                                                   0)
-        #,output_shape=(moving.shape[1],moving.shape[2])),0)# check if output size specification is necessary -ng
-      
-        moving_aligned=uint16m(moving_aligned)
-        moving_aligned_full=moving_aligned.copy()
+        # Block-wise soma-avoiding FFT cross-correlation (alignseq_maxthresh).
+        xoff, yoff = block_xcorr_translation(fixed_sum, moving_sum,
+                                             block_size=block_size,
+                                             resize_factor=resize_factor,
+                                             subsample_rate=subsample_rate,
+                                             intensity_max_thresh=intensity_max_thresh,
+                                             disk_radius=disk_radius)
+        logging.debug(f'transform for {infile} -> {fixed_file}: xoff={xoff:.3f} yoff={yoff:.3f}')
+
+        # MATLAB applies imtranslate(im, [xoff,yoff]); skimage.warp uses the
+        # inverse map, so translate by the negative to reproduce imtranslate.
+        tform = ski.transform.SimilarityTransform(translation=[-xoff, -yoff])
+        moving_aligned = np.zeros_like(moving)
+        for ch in range(moving.shape[0]):
+            moving_aligned[ch,:,:] = ski.transform.warp(np.squeeze(moving[ch,:,:]),
+                                                        tform,
+                                                        preserve_range=True,
+                                                        output_shape=(moving.shape[1], moving.shape[2]))
+        moving_aligned = uint16m(moving_aligned)
         logging.debug(f'done processing {base}.{ext} ')
         logging.info(f'writing to {outfile}')
-        write_image(outfile, moving_aligned_full)
+        write_image(outfile, moving_aligned)
         logging.debug(f'done writing {outfile}')
 
 

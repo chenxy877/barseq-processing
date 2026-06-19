@@ -24,23 +24,22 @@ from barseq.core import *
 from barseq.utils import *
 from barseq.imageutils import *
 
-def background_cv2_single(image, radius, num_c=4):
+def background_ball_single(image, radius, num_c=4):
     '''
-    
+    Background subtraction matching MATLAB fixbleed:
+    per (seq) channel, im - imopen(im, strel('ball', radius, radius)).
+
+    Uses a grayscale (non-flat) BALL structuring element via
+    imageutils.ball_tophat -- NOT a flat cv2 disk, which is what the original
+    Python used. Extra channels (e.g. BF) beyond num_c are preserved unchanged.
     '''
-    I=image.copy()
-    I_filtered=np.zeros_like(I)
-    # save any extra channels. 
-    I_rem=I[num_c:,:,:]
-    I=I[0:num_c,:,:]
-    k=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(radius,radius))
-    for i in range(len(I)):
-        bck=cv2.morphologyEx(I[i,:,:], cv2.MORPH_OPEN, kernel= k)
-        I_filtered[i,:,:]=I[i,:,:]-np.expand_dims(bck,0)
-    # restore extra channel(s)
-    I_filtered[num_c:,:,:]=I_rem    
-    I_filtered=uint16m(I_filtered)
-    return I_filtered
+    I = image
+    I_filtered = np.zeros(I.shape, dtype=np.float64)
+    for i in range(num_c):
+        I_filtered[i, :, :] = ball_tophat(I[i, :, :], radius)
+    # preserve extra channel(s) unchanged
+    I_filtered[num_c:, :, :] = I[num_c:, :, :].astype(np.float64)
+    return uint16m(I_filtered)
 
 def regchannels_ski_single(image, channel_shift, is_affine=False):
     '''
@@ -125,7 +124,9 @@ def preprocess_py( infiles, outfiles, stage=None, cp=None):
     # Get parameters for all steps.
     mode = get_config_list(cp, stage, 'modes')
     mode = mode[0]
-    radius = int(cp.get('cv2','radius'))
+    # Background ball radius matches MATLAB ball_radius (geneseq=6, hyb=100),
+    # read per-stage. (MATLAB applies a grayscale 'ball' SE, see ball_tophat.)
+    radius = int(cp.get(stage, 'background_radius', fallback='0'))
     output_dtype = cp.get( stage,'output_dtype')
     logging.debug(f'output_dtype={output_dtype} radius = {radius} ')
     resource_dir = os.path.abspath(os.path.expanduser( cp.get('barseq','resource_dir')))
@@ -152,22 +153,24 @@ def preprocess_py( infiles, outfiles, stage=None, cp=None):
         logging.info(f'Handling {infile} -> {outfile}')                
         (dirpath, base, label, ext) = split_path(os.path.abspath(infile))
 
-        # Background correction
-        I = read_image( infile)      
-        if radius > 0:
-            Ibacksub = background_cv2_single(I, radius)
-        else:
-            Ibacksub = I       
-        logging.debug(f'Done background. mode={mode} n_channnels={len(Ibacksub)}')
-        
-        logging.debug(f'Do regchannels...')
-        # Regchannels
-        # Register channels within each image. 
-        Ishifted = regchannels_ski_single(image=Ibacksub, channel_shift=chshift)
+        I = read_image( infile)
+
+        # MATLAB fixbleed order: (1) shift channels, (2) background, (3) bleedthrough.
+        # 1. Channel registration (chromatic shift) -- applied FIRST in MATLAB.
+        logging.debug(f'Do regchannels (shift)...')
+        Ishifted = regchannels_ski_single(image=I, channel_shift=chshift)
         logging.debug(f'Done with regchannels. mode={mode} n_channnels={len(Ishifted)}')
 
-        logging.debug(f'Do bleedthrough...')       
-        Icorrected = bleedthrough_np_single(Ishifted, chprofile)
+        # 2. Background subtraction (grayscale ball top-hat).
+        if radius > 0:
+            Ibacksub = background_ball_single(Ishifted, radius)
+        else:
+            Ibacksub = Ishifted
+        logging.debug(f'Done background. mode={mode} n_channnels={len(Ibacksub)}')
+
+        # 3. Bleedthrough correction.
+        logging.debug(f'Do bleedthrough...')
+        Icorrected = bleedthrough_np_single(Ibacksub, chprofile)
         logging.debug(f'Done bleedthrough. mode={mode} n_channnels={len(Icorrected)}')
         logging.debug(f'done processing {base}.{ext} ')
         logging.info(f'writing to {outfile}')
@@ -235,8 +238,9 @@ if __name__ == '__main__':
        
     datestr = dt.datetime.now().strftime("%Y%m%d%H%M")
 
-    preprocess_py( infiles=args.infiles, 
-                     outfiles=args.outfiles, 
+    preprocess_py( infiles=args.infiles,
+                     outfiles=args.outfiles,
+                     stage=args.stage,
                      cp=cp )
     (outdir, file) = os.path.split(args.outfiles[0])
     logging.info(f'done processing output to {outdir}')

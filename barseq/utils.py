@@ -22,12 +22,16 @@ def format_config(cp):
     return s
 
 def get_boolean(s):
-    TRUES = [ 1 , '1', 'true']
-    FALSES = [ 0 , '0', 'false']
+    # Case-insensitive: ConfigParser values like 'True'/'False' (capitalised) must parse.
+    # Previously only lowercase 'true'/'false' matched, so e.g. do_min_subtraction = True
+    # silently became None (falsy) and the n2v min-subtraction was skipped.
+    TRUES = [ 1 , '1', 'true', 'yes', 'on']
+    FALSES = [ 0 , '0', 'false', 'no', 'off']
+    key = s.strip().lower() if isinstance(s, str) else s
     a = None
-    if s in TRUES:
+    if key in TRUES:
         a = True
-    elif s in FALSES:
+    elif key in FALSES:
         a = False
     return a
 

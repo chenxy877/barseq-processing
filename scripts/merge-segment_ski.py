@@ -64,11 +64,11 @@ def merge_segment_ski( infiles, outfiles, stage=None, cp=None ):
 def handle_single_tile_segmentation(infile, dilation_radius):
     logging.debug(f'handling infile {infile} dilation_radius = {dilation_radius}')
     mask = read_image( infile )
-    mask_dil = expand_labels( mask, dilation_radius)
-    measure = regionprops_table(mask_dil, properties=('label','centroid'))
-    cell_num=measure['label']
-    cent_x=measure['centroid-0']
-    cent_y=measure['centroid-1']
+    # MATLAB import_cellpose: iterative imdilate(ones(3)) filling only
+    # background, and per-cell MEDIAN centroid in [x=col, y=row] order
+    # (skimage expand_labels + mean regionprops centroid was the prior, divergent code).
+    mask_dil = expand_labels_matlab( mask, dilation_radius)
+    cell_num, cent_x, cent_y = label_median_centroids(mask_dil)
     return mask,mask_dil,cell_num,cent_x,cent_y
 
 
