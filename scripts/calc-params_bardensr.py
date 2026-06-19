@@ -29,6 +29,31 @@ from barseq.core import *
 from barseq.utils import *
 from barseq.imageutils import *
 
+from joblib import Parallel, delayed
+
+
+# Module-level per-FOV workers for joblib (loky) parallelism in calc_params_bardensr.
+# They use the module-level `bardensr` and `bd_read_image_set` (re-imported per worker).
+def _cp_fov_maxrc(tileset, R, C, cropf):
+    return bd_read_image_set(tileset, R, C, cropf=cropf).max(axis=(1, 2, 3))
+
+def _cp_fov_errmax(tileset, R, C, codeflat, median_max, pos0, trim, noisefloor_ini):
+    img_norm = bd_read_image_set(tileset, R, C, trim=trim) / median_max[:, None, None, None]
+    et = bardensr.spot_calling.estimate_density_singleshot(img_norm, codeflat, noisefloor_ini)
+    return et[:, :, :, pos0].max(axis=(0, 1, 2))
+
+def _cp_fov_fdr(tileset, R, C, codeflat, median_max, pos0, cropf, noisefloor_final, thresh_grid):
+    img_norm = bd_read_image_set(tileset, R, C, cropf=cropf) / median_max[:, None, None, None]
+    et = bardensr.spot_calling.estimate_density_singleshot(img_norm, codeflat, noisefloor_final)
+    err_c_list, total_c_list = [], []
+    for thresh1 in thresh_grid:
+        spots = bardensr.spot_calling.find_peaks(et, thresh1, use_tqdm_notebook=False)
+        err_c = sum((spots.j == k).to_numpy().sum() for k in pos0)
+        err_c_list.append(int(err_c))
+        total_c_list.append(int(len(spots) - err_c))
+    return err_c_list, total_c_list
+
+
 def calc_params_bardensr( infiles, outfiles, stage=None, cp=None):
     '''
     infiles and outfiles are *lists of lists* rather than usual 
@@ -91,62 +116,42 @@ def calc_params_bardensr( infiles, outfiles, stage=None, cp=None):
     # OUTPUT DICT
     param_outputs = {}
 
-    # CALCULATING MAX OF EACH CYCLE AND EACH CHANNEL ACROSS ALL CONTROL FOVS
-    logging.debug(f'calculating max_per_RC...')
-    # max_per_RC=[ bd_read_image_single(infile, R, C, cropf=cropf).max(axis=(1,2,3)) for infile in infiles ]
-    max_per_RC = [ bd_read_image_set(tileset, R, C, cropf=cropf).max(axis=(1,2,3)) for tileset in infiles ] 
-    # Expected to be 28 values. channels * cycles. 
-    # first max(), then median of those max() per cycle. 
-    s = pprint.pformat(max_per_RC, indent=4)
-    logging.info(f'max per RC = {s}')
-    
-    median_max=np.median(max_per_RC, axis=0)
-    s = pprint.pformat(median_max, indent=4)
-    logging.info(f'median_max = {s}')
+    # PARALLELISM: calc-params is ONE command over ALL (control) FOVs (it needs them
+    # all to compute the global median_max + threshold), so the workflow's per-FOV
+    # JobSet cannot split it. But the per-FOV et/find_peaks work IS independent, so we
+    # parallelize the three passes with joblib over FOVs (loky processes; bardensr/TF
+    # re-imported per worker via PYTHONPATH). n_cp_jobs from [bardensr] n_jobs.
+    n_cp_jobs = min(len(infiles), cp.getint('bardensr', 'n_jobs', fallback=8))
+    logging.info(f'calc-params parallelism: {n_cp_jobs} jobs over {len(infiles)} FOVs')
+    pos0 = pos_unused_codes[0]
 
-    # ESTABLISHING BASE THRESHOLD AT THE MEDIAN OF MAXIMUM ERROR READOUT
-    err_max=[]
-    evidence_tensors=[]
-    for tileset in infiles:
-        logging.debug(f'spot_calling.estimate_density_singleshot. file={file} R={R} C={C} trim={trim} noisefloor_ini = {noisefloor_ini}')
-        trimmed = bd_read_image_set(tileset, R, C, trim=trim)
-        img_norm = trimmed / median_max[:, None, None, None]
-        et = bardensr.spot_calling.estimate_density_singleshot( img_norm , codeflat, noisefloor_ini )
-        # BUG FIX: pos_unused_codes is a 2-tuple (row_idx, col_idx) from np.where on the
-        # 2-D genes array, with col_idx all 0. Indexing the code axis with the full tuple
-        # selected the 5 unused codes PLUS gene index 0 (Calb1) five times, inflating the
-        # base threshold (-> 0.796 vs MATLAB 0.676). Use only the row indices (the 5 unused
-        # codes), matching MATLAB ercc_codes. Same convention as the FDR loop below.
-        err_max.append( et[ :, :, :, pos_unused_codes[0]].max(axis=(0,1,2)))
-    err_max = np.array( err_max )
-    thresh = np.median( np.median( err_max, axis=1))
+    # PASS 1: per-FOV max over each (cycle,channel) frame (center crop) -> global median_max.
+    max_per_RC = Parallel(n_jobs=n_cp_jobs)(
+        delayed(_cp_fov_maxrc)(tileset, R, C, cropf) for tileset in infiles)
+    median_max = np.median(max_per_RC, axis=0)
+    logging.info(f'median_max = {pprint.pformat(median_max, indent=4)}')
+
+    # PASS 2: per-FOV base evidence over the unused codes -> intensity_thresh_ini.
+    # (BUG FIX: index the code axis with pos_unused_codes[0] only -- the 2-tuple form
+    # pulled gene 0/Calb1 into the base threshold, inflating it to 0.796 vs 0.676.)
+    err_max = np.array(Parallel(n_jobs=n_cp_jobs)(
+        delayed(_cp_fov_errmax)(tileset, R, C, codeflat, median_max, pos0, trim, noisefloor_ini)
+        for tileset in infiles))
+    thresh = np.median(np.median(err_max, axis=1))
     logging.info(f'intensity_thresh_ini={thresh}')
 
-    # FIND OPTIMUM THRESHOLD WITH LOWEST FDR 
-    err_c_all=[]
-    total_c_all=[]
-    for tileset in infiles:
-        dirpath, base, label, ext = split_path( os.path.abspath(tileset[0]))
-        dirpath, subdir, label, ext = split_path( os.path.abspath(dirpath))
-        logging.debug(f'handling image base={base}')
-        cropped = bd_read_image_set(tileset, R, C, cropf=cropf)
-        img_norm = cropped / median_max[:, None, None, None]
-        et=bardensr.spot_calling.estimate_density_singleshot( img_norm , codeflat, noisefloor_final)
-        # MATLAB bardensrbasecall.py evaluates FDR over linspace(thresh-0.1, thresh+0.5, 10)
-        # but selects thresh_refined from linspace(thresh-0.1, thresh+0.1, 10) at the crossing
-        # index. The wider FDR search makes the crossing index smaller -> a lower selected
-        # threshold. Python previously used thresh+0.1 for the search too, yielding a higher
-        # threshold (0.796 vs MATLAB 0.676). Match MATLAB's search range here.
-        for thresh1 in np.linspace( thresh-0.1, thresh+0.5, 10):
-            spots = bardensr.spot_calling.find_peaks(et, thresh1, use_tqdm_notebook=False)
-            logging.info(f'For base={base} found {len(spots)} spots.')          
-            err_c=0
-            for err_idx in pos_unused_codes[0]:
-                err_c=err_c + (spots.j == err_idx).to_numpy().sum()
-            err_c_all.append( err_c )
-            total_c_all.append(len(spots) - err_c)      
+    # PASS 3: per-FOV FDR counts over the threshold grid. MATLAB bardensrbasecall.py
+    # evaluates FDR over linspace(thresh-0.1, thresh+0.5, 10) but selects thresh_refined
+    # from linspace(thresh-0.1, thresh+0.1, 10) at the crossing index (the wider search
+    # lowers the crossing index -> lower threshold; matches MATLAB's 0.676).
+    thresh_grid = np.linspace(thresh - 0.1, thresh + 0.5, 10)
+    fdr_results = Parallel(n_jobs=n_cp_jobs)(
+        delayed(_cp_fov_fdr)(tileset, R, C, codeflat, median_max, pos0, cropf, noisefloor_final, thresh_grid)
+        for tileset in infiles)
+    err_c_all = [e for (ec, tc) in fdr_results for e in ec]
+    total_c_all = [t for (ec, tc) in fdr_results for t in tc]
 
-    # CALCULATE FALSE DISCOVERY RATE, GIVEN N_SPOTS FOUND AT INTENSITY THRESHOLD         
+    # CALCULATE FALSE DISCOVERY RATE, GIVEN N_SPOTS FOUND AT INTENSITY THRESHOLD
     err_c_all1 = np.reshape(err_c_all, [ len(infiles), 10 ])
     total_c_all1 = np.reshape(total_c_all, [ len(infiles), 10]) + 1
     fdr = err_c_all1 / len(pos_unused_codes[0]) * (len(genes)-len(pos_unused_codes[0])) / (total_c_all1)

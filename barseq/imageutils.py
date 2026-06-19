@@ -229,13 +229,13 @@ def ball_tophat(image2d, radius, exact_max_radius=24):
 
     For small radii (<= exact_max_radius, e.g. geneseq r=6) this uses the exact
     true-ball grey opening (matches MATLAB N=0 to <1 count). For large radii
-    (e.g. hyb r=100) the exact 2D grey opening is far too slow (~11 min/channel
-    at r=100), so the ball background is APPROXIMATED by opening a downsampled
-    image and upsampling the background.
-
-    FLAG: the large-radius path is an approximation of MATLAB's ball opening
-    (which itself uses the N=8 line approximation for large balls). Replace with
-    an exact N=8 line-decomposition port if hyb background precision matters.
+    (e.g. hyb r=100) the exact 2D grey opening is far too slow (~11 min/channel),
+    so the GRAYSCALE ball is computed on a downsampled image and upsampled
+    (downsampled-exact). This matches MATLAB strel('ball',100) (which itself uses
+    the N=8 line approximation) better than a flat disk: on MATLAB's own n2v hyb
+    ch0 the downsampled-exact tophat = 18.83 vs MATLAB aligned 18.95, whereas the
+    old flat-disk gave 23.94 (over-subtracting too little background -> hyb
+    over-call). See scratch/test_ball3.py.
     Returns float64.
     '''
     f = np.asarray(image2d, dtype=np.float64)
@@ -243,17 +243,28 @@ def ball_tophat(image2d, radius, exact_max_radius=24):
     if r <= exact_max_radius:
         opened = np.rint(ball_opening(f, r))
     else:
-        # Large radius (e.g. hyb r=100): the exact grey ball opening is ~11 min/
-        # channel. At large R the (very tall, height==R) ball opening is well
-        # approximated by a FLAT disk opening (validated vs MATLAB ball-100:
-        # corr ~0.99, mean within ~1.5 counts; see scratch/exp_ball100.*), and
-        # cv2 makes it tractable (~20s/channel). FLAG: flat-disk approximation of
-        # the tall ball -- replace with an exact N=8 line decomposition if hyb
-        # background precision proves to matter.
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
-        opened = cv2.morphologyEx(f.astype(np.float32), cv2.MORPH_OPEN, k).astype(np.float64)
-        opened = np.rint(opened)
+        opened = np.rint(_downsampled_ball_opening(f, r, downsample=4))
     return np.clip(f - opened, 0, None)
+
+
+def _downsampled_ball_opening(image2d, radius, downsample=4):
+    '''
+    Grayscale ball opening for large radii, fast: downsample by `downsample`,
+    do the exact grey opening with a ball of spatial radius radius/downsample but
+    full intensity height `radius` (MATLAB strel('ball',R,H) height profile
+    (H/R)*sqrt(R^2-d^2), here on the reduced grid), then upsample the background.
+    ~3s/channel at r=100 vs ~11 min exact; validated vs MATLAB (see ball_tophat).
+    '''
+    s = int(downsample)
+    small = ndi.zoom(image2d, 1.0 / s, order=1)
+    rs = max(1, int(round(radius / s)))
+    yy, xx = np.mgrid[-rs:rs + 1, -rs:rs + 1]
+    d2 = xx * xx + yy * yy
+    fp = d2 <= rs * rs
+    ht = np.zeros(d2.shape, dtype=np.float64)
+    ht[fp] = (float(radius) / rs) * np.sqrt(rs * rs - d2[fp])   # spatial rs, peak height = radius
+    op_small = ndi.grey_opening(small, footprint=fp, structure=ht)
+    return ndi.zoom(op_small, np.array(image2d.shape) / np.array(small.shape), order=1)
 
 
 def channel_names_index_map(select_channels, image_channels):
