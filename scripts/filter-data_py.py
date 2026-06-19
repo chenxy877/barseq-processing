@@ -65,7 +65,7 @@ def filter_data(infiles, outfiles, stage=None, cp=None):
     project_id = cp.get( 'project','project_id')
     rescale_factor=cp.getfloat(stage, 'rescale_factor')
     px = cp.getfloat( stage, 'px')
-    box_half_width_um = cp.getint( stage, 'box_half_width_um')
+    box_half_width_um = cp.getfloat( stage, 'box_half_width_um')
     search_radius_um = cp.getint( stage, 'search_radius_um')
 
     logging.info(f'stage={stage} rescale_factor={rescale_factor} px={px} box_half_width_um={box_half_width_um} search_radius_um = {search_radius_um} ')
