@@ -114,7 +114,14 @@ def filter_data(infiles, outfiles, stage=None, cp=None):
         search_cells_id = cell_id[sel_cells_id]
         search_neighbors_id = nearest_neigh_id[sel_cells_id]
         search_dist = distances_neigh
-        
+
+        # INTENTIONAL DEVIATION FROM MATLAB (flagged, kept): this is a full AABB box-overlap test
+        # (either edge of the neighbor inside the cell, in BOTH axes, then symmetrized). MATLAB
+        # filter_overlapping_neurons.m tests only cell n's MAX corner inside the neighbor, which for
+        # equal-size boxes only fires when one cell is SW of the other -> it misses ~50% of real
+        # overlaps (the NW-SE / anti-diagonal pairs; verified ~50/50 on D077). Python's test is the
+        # geometrically correct one, so we keep it; MATLAB under-detects (removes ~2x fewer). See
+        # barseq-validation-status memory / scratch/compare_overlap_logic.py.
         id_overlap=((((xmin[idx_slice][search_cells_id]<xmin[idx_slice][search_neighbors_id])&(xmin[idx_slice][search_neighbors_id]<xmax[idx_slice][search_cells_id])) |
                      ((xmin[idx_slice][search_cells_id]<xmax[idx_slice][search_neighbors_id])&(xmax[idx_slice][search_neighbors_id]<xmax[idx_slice][search_cells_id]))) & 
                      (((ymin[idx_slice][search_cells_id]<ymin[idx_slice][search_neighbors_id])&(ymin[idx_slice][search_neighbors_id]<ymax[idx_slice][search_cells_id])) | 
